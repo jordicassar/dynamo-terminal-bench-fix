@@ -13,29 +13,50 @@ LOG_PATTERN = re.compile(
     r'(?P<path>\S+)\s+HTTP/\d(?:\.\d)?"\s+\d{3}\s+\S+$'
 )
 
-EXPECTED_KEYS = {"total_requests", "unique_ips", "top_path"}
+EXPECTED_KEYS = {
+    "total_requests",
+    "unique_ips",
+    "top_path",
+}
 
 
 def calculate_expected_report() -> dict[str, Any]:
+    """Independently calculate the required report from the access log."""
     path_counts: Counter[str] = Counter()
+    first_seen: dict[str, int] = {}
     unique_ips: set[str] = set()
     total_requests = 0
 
     with LOG_PATH.open(encoding="utf-8") as log_file:
-        for raw_line in log_file:
+        for line_number, raw_line in enumerate(log_file):
             line = raw_line.strip()
+
             if not line:
                 continue
 
-            match = LOG_PATTERN.match(line)
+            match = LOG_PATTERN.fullmatch(line)
+
             if match is None:
                 continue
 
-            total_requests += 1
-            unique_ips.add(match.group("ip"))
-            path_counts[match.group("path")] += 1
+            ip_address = match.group("ip")
+            path = match.group("path")
 
-    top_path = path_counts.most_common(1)[0][0] if path_counts else ""
+            total_requests += 1
+            unique_ips.add(ip_address)
+            path_counts[path] += 1
+            first_seen.setdefault(path, line_number)
+
+    if path_counts:
+        top_path = min(
+            path_counts,
+            key=lambda path: (
+                -path_counts[path],
+                first_seen[path],
+            ),
+        )
+    else:
+        top_path = ""
 
     return {
         "total_requests": total_requests,
@@ -45,6 +66,11 @@ def calculate_expected_report() -> dict[str, Any]:
 
 
 def load_report() -> dict[str, Any]:
+    """Load the generated report and return its JSON object."""
+    assert REPORT_PATH.is_file(), (
+        f"Missing required artifact: {REPORT_PATH}"
+    )
+
     try:
         with REPORT_PATH.open(encoding="utf-8") as report_file:
             report = json.load(report_file)
@@ -53,23 +79,15 @@ def load_report() -> dict[str, Any]:
             f"{REPORT_PATH} is not valid JSON: {error}"
         ) from error
 
-    assert isinstance(report, dict), "Report root must be a JSON object"
+    assert isinstance(report, dict), (
+        "The report root must be a JSON object"
+    )
+
     return report
 
 
-def test_report_exists() -> None:
-    """The agent must write the required /app/report.json artifact."""
-    assert REPORT_PATH.is_file(), f"Missing required artifact: {REPORT_PATH}"
-
-
-def test_report_is_valid_json_object() -> None:
-    """The report must be valid JSON with an object at the root."""
-    report = load_report()
-    assert isinstance(report, dict), "Report root must be a JSON object"
-
-
-def test_report_has_exact_schema() -> None:
-    """The report must contain exactly the three required fields."""
+def test_report_schema() -> None:
+    """Criterion 1: The report is valid JSON with exactly the required fields."""
     report = load_report()
 
     assert set(report) == EXPECTED_KEYS, (
@@ -79,22 +97,22 @@ def test_report_has_exact_schema() -> None:
 
 
 def test_report_field_types() -> None:
-    """The report fields must use the required JSON data types."""
+    """Criterion 2: Each report field uses its required JSON data type."""
     report = load_report()
 
     assert type(report["total_requests"]) is int, (
-        "total_requests must be a JSON integer"
+        "total_requests must be an integer"
     )
     assert type(report["unique_ips"]) is int, (
-        "unique_ips must be a JSON integer"
+        "unique_ips must be an integer"
     )
-    assert isinstance(report["top_path"], str), (
-        "top_path must be a JSON string"
+    assert type(report["top_path"]) is str, (
+        "top_path must be a string"
     )
 
 
 def test_total_requests() -> None:
-    """total_requests must equal the number of valid access-log entries."""
+    """Criterion 3: total_requests equals the number of valid log entries."""
     report = load_report()
     expected = calculate_expected_report()
 
@@ -105,7 +123,7 @@ def test_total_requests() -> None:
 
 
 def test_unique_ips() -> None:
-    """unique_ips must equal the number of distinct valid client IPs."""
+    """Criterion 4: unique_ips equals the number of distinct valid client IPs."""
     report = load_report()
     expected = calculate_expected_report()
 
@@ -116,7 +134,7 @@ def test_unique_ips() -> None:
 
 
 def test_top_path() -> None:
-    """top_path must equal the most frequently requested valid URL path."""
+    """Criterion 5: top_path is the most frequent path with first-seen tie-breaking."""
     report = load_report()
     expected = calculate_expected_report()
 
